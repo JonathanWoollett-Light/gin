@@ -1,0 +1,28 @@
+def to_frames(data: dict[str, bytes], track: bool = True) -> np.ndarray:
+    # [time x sample x feature]
+    size: Callable[[int], tuple[int, int, int]] = lambda time: (
+        time,
+        len(data),
+        FEATURES,
+    )
+    time = 0
+    events: np.ndarray = np.zeros(size(time))
+
+    with tqdm(total=len(data), desc="Framing", disable=not track) as bar:
+        for key, value in enumerate(data.values()):
+            # Assert each example is a multiple of 5 bytes (40 bits).
+            assert len(value) % 5 == 0
+
+            for i in range(0, len(value), 5):
+                # Get event.
+                event = to_event(value[i : i + 5])
+
+                # Resize events to accomdate the largest timestep.
+                time = max(time, event.time + 1)
+                print(f"size: {size(time)}")
+                events.resize(size(time))
+
+                # Set event.
+                events[event.time, key, event.x + event.y * 28] = int(event.polarity)
+            bar.update(1)
+    return events

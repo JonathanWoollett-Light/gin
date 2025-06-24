@@ -1,0 +1,26 @@
+[project]
+name = "gin"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Jonathan",email = "jonathanwoollettlight@proton.me"}
+]
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "requests (>=2.32.4,<3.0.0)",
+    "tqdm (>=4.67.1,<5.0.0)",
+    "numpy (>=2.3.1,<3.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "gin", from = "src"}]
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.1"
+black = "^25.1.0"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
