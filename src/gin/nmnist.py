@@ -68,8 +68,10 @@ def to_event(data: bytes) -> Event:
     # Extract components using bitwise operations
     x = (value >> 32) & 0xFF  # Shift 32 bits right, mask 8 bits
     y = (value >> 24) & 0xFF  # Shift 24 bits right, mask 8 bits
-    
-    assert 0 <= x < 28 and 0 <= y < 28, f"x: {x}, y: {y}, value: {value}, data: {[data[0],data[1],data[2],data[4]]}, all 8 bit samples: {[value >> i & 0xFF for i in range(0,40,8)]}"
+
+    assert (
+        0 <= x < 28 and 0 <= y < 28
+    ), f"x: {x}, y: {y}, value: {value}, data: {[data[0],data[1],data[2],data[4]]}, all 8 bit samples: {[value >> i & 0xFF for i in range(0,40,8)]}"
     polarity = bool((value >> 23) & 1)  # Shift 23 bits right, mask 1 bit
     time = value & 0x7FFFFF  # Mask lower 23 bits
     return Event(x, y, polarity, time)
@@ -84,20 +86,21 @@ def to_events(data: dict[str, bytes], track: bool = True) -> list[list[Event]]:
 
             # Get events.
             events = [to_event(value[i : i + 5]) for i in range(0, len(value), 5)]
-            
+
             # Sort by timestep.
-            events.sort(key = lambda event: event.time)
+            events.sort(key=lambda event: event.time)
 
             # Add example.
             examples.append(events)
             bar.update(1)
     return examples
 
-def to_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO: # type: ignore
+
+def to_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:  # type: ignore
     # [time x sample x feature]
     n_samples = len(data)
-    events_dict: dict[tuple[int,int,int], int] = {}  # Stores coordinates and values
-    max_time = 0      # Tracks maximum time dimension
+    events_dict: dict[tuple[int, int, int], int] = {}  # Stores coordinates and values
+    max_time = 0  # Tracks maximum time dimension
 
     with tqdm(total=len(data), desc="Framing", disable=not track) as bar:
         for sample_idx, value in enumerate(data.values()):
@@ -106,33 +109,36 @@ def to_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO: # type:
 
             for i in range(0, len(value), 5):
                 # Decode event
-                event = to_event(value[i:i+5])
-                
+                event = to_event(value[i : i + 5])
+
                 # Update max time dimension
                 max_time = max(event.time + 1, max_time)
-                
+
                 # Calculate feature index
                 assert 0 <= event.x < 28, f"{event.x}"
                 assert 0 <= event.y < 28, f"{event.y}"
                 feature_idx = event.x + event.y * 28
                 assert feature_idx < FEATURES
                 coord = (event.time, sample_idx, feature_idx)
-                
+
                 # Store only non-zero values (polarity 1)
                 events_dict[coord] = 1 if event.polarity else -1
-            
+
             bar.update(1)
-    
+
     # Convert dictionary to sparse array
     coords = np.array(list(events_dict.keys())).T
-    assert coords.shape == (3, len(events_dict)), f"{coords.shape} != {(3, len(events_dict))}"
+    assert coords.shape == (
+        3,
+        len(events_dict),
+    ), f"{coords.shape} != {(3, len(events_dict))}"
     data_vals = np.array(list(events_dict.values()))
-    assert data_vals.shape == (len(events_dict),), f"{data_vals.shape} != {(len(events_dict),)}"
+    assert data_vals.shape == (
+        len(events_dict),
+    ), f"{data_vals.shape} != {(len(events_dict),)}"
 
-    return sparse.COO( # type: ignore
-        coords=coords,
-        data=data_vals,
-        shape=(max_time, n_samples, FEATURES)
+    return sparse.COO(  # type: ignore
+        coords=coords, data=data_vals, shape=(max_time, n_samples, FEATURES)
     )
 
 
