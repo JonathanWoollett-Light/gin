@@ -3,9 +3,8 @@ import os
 from io import BytesIO
 import numpy as np
 from tqdm import tqdm
-from typing import Callable
 import numpy as np
-import sparse # type: ignore
+import sparse
 from tqdm import tqdm
 
 SOURCE = "https://prod-dcd-datasets-cache-zipfiles.s3.eu-west-1.amazonaws.com/468j46mzdv-1.zip"
@@ -69,7 +68,8 @@ def to_event(data: bytes) -> Event:
     # Extract components using bitwise operations
     x = (value >> 32) & 0xFF  # Shift 32 bits right, mask 8 bits
     y = (value >> 24) & 0xFF  # Shift 24 bits right, mask 8 bits
-    assert 0 <= x < 28 and 0 <= y < 28, f"{x}, {y}, {value}, {data}"
+    
+    assert 0 <= x < 28 and 0 <= y < 28, f"x: {x}, y: {y}, value: {value}, data: {[data[0],data[1],data[2],data[4]]}, all 8 bit samples: {[value >> i & 0xFF for i in range(0,40,8)]}"
     polarity = bool((value >> 23) & 1)  # Shift 23 bits right, mask 1 bit
     time = value & 0x7FFFFF  # Mask lower 23 bits
     return Event(x, y, polarity, time)
