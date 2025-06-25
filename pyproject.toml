@@ -22,6 +22,7 @@ packages = [{include = "gin", from = "src"}]
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.4.1"
 black = "^25.1.0"
+pyright = "^1.1.402"
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]
