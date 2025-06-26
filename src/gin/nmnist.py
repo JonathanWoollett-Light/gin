@@ -5,8 +5,10 @@ import numpy as np
 from tqdm import tqdm
 import numpy as np
 from dataclasses import dataclass
+from typing import Callable
+from tempfile import NamedTemporaryFile
 
-# import numpy.typing as npt
+import numpy.typing as npt
 import sparse
 from tqdm import tqdm
 from numpy import int8, int32, int64
@@ -18,12 +20,19 @@ TEST = "Test.zip"
 TRAIN = "Train.zip"
 FEATURE_DIMENSION = 34
 FEATURES = FEATURE_DIMENSION * FEATURE_DIMENSION
+MS_TIMESTEPS = 337  # Maximum timestep of datatset in milliseconds
+
+
+@dataclass
+class SparseFrameData:
+    test: sparse.COO
+    train: sparse.COO
 
 
 @dataclass
 class FrameData:
-    test: sparse.COO
-    train: sparse.COO
+    test: npt.NDArray[int8]
+    train: npt.NDArray[int8]
 
 
 @dataclass
@@ -90,13 +99,65 @@ def to_events(data: dict[str, bytes], track: bool = True) -> list[list[Event]]:
     return examples
 
 
-def to_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
+# When using frames we discretize timesteps over milliseconds instead of microseconds to be able to handle the dataset given memory limitations.
+def to_frames(
+    data: dict[str, bytes], track: bool = True, memory_bytes: int = 1024**3
+) -> npt.NDArray[int8]:
+    # [time x sample x features..]
+    size: Callable[[int], tuple[int, int, int, int]] = lambda n: (
+        MS_TIMESTEPS,
+        n,
+        FEATURE_DIMENSION,
+        FEATURE_DIMENSION,
+    )
+    # The number of samples to store in memory to remain under `memory_bytes`
+    memory_samples = memory_bytes // (
+        MS_TIMESTEPS * FEATURE_DIMENSION * FEATURE_DIMENSION
+    )
+    print(f"memory_samples: {memory_samples}")
+    mem_events: npt.NDArray[int8] = np.zeros(
+        shape=size(memory_samples), dtype=int8
+    )  # TODO Why can't I use `np.empty` here?
+    dsk_events: npt.NDArray[int8] = np.memmap(
+        filename=NamedTemporaryFile(), dtype=int8, mode="w+", shape=size(len(data))
+    )
+    data_list: list[bytes] = list(data.values())
+
+    max_ts = 0
+    with tqdm(total=len(data), desc="Framing", disable=not track) as bar:
+        for chunk in range(0, len(data) // memory_samples):
+            mem_events.fill(0)
+            start, stop = chunk * memory_samples, (chunk + 1) * memory_samples
+            for sample_idx, value in enumerate(data_list[start:stop]):
+                # Assert each example is a multiple of 5 bytes (40 bits).
+                assert len(value) % 5 == 0
+
+                for i in range(0, len(value), 5):
+                    # Get event.
+                    event = to_event(value[i : i + 5])
+
+                    # Set event.
+                    assert event.time // 1000 < MS_TIMESTEPS, f"{event.time // 1000}"
+                    if event.time // 1000 > max_ts:
+                        max_ts = event.time // 1000
+
+                    mem_events[event.time // 1000, sample_idx, event.x, event.y] = (
+                        1 if event.polarity else -1
+                    )
+                bar.update(1)
+            dsk_events[:, start:stop, :, :] = mem_events
+            dsk_events.flush()
+    print(f"found max: {max_ts}")
+    return dsk_events
+
+
+# When using frames we discretize timesteps over milliseconds instead of microseconds to be able to handle the dataset given memory limitations.
+def to_sparse_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
     # [time x sample x feature]
     n_samples = len(data)
     events_dict: dict[tuple[int64, int32, int8, int8], int] = (
         {}
     )  # Stores coordinates and values
-    max_time: int64 = int64(0)  # Tracks maximum time dimension
 
     with tqdm(total=len(data), desc="Framing", disable=not track) as bar:
         for sample_idx, value in enumerate(data.values()):
@@ -107,13 +168,10 @@ def to_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
                 # Decode event
                 event = to_event(value[i : i + 5])
 
-                # Update max time dimension
-                max_time = event.time + 1 if event.time + 1 > max_time else max_time
-
                 # Calculate feature index
                 assert 0 <= event.x < FEATURE_DIMENSION, f"{event.x}"
                 assert 0 <= event.y < FEATURE_DIMENSION, f"{event.y}"
-                coord = (event.time, int32(sample_idx), event.x, event.y)
+                coord = (event.time // 1000, int32(sample_idx), event.x, event.y)
 
                 # Store only non-zero values (polarity 1)
                 events_dict[coord] = 1 if event.polarity else -1
@@ -134,7 +192,7 @@ def to_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
     return sparse.COO(
         coords=coords,
         data=data_vals,
-        shape=(max_time, n_samples, FEATURE_DIMENSION, FEATURE_DIMENSION),
+        shape=(MS_TIMESTEPS, n_samples, FEATURE_DIMENSION, FEATURE_DIMENSION),
     )
 
 
@@ -142,6 +200,11 @@ def to_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
 class NMNIST:
     test: dict[str, bytes]
     train: dict[str, bytes]
+
+    def sparse_frames(self, track: bool = True) -> SparseFrameData:
+        test = to_sparse_frames(self.test, track)
+        train = to_sparse_frames(self.train, track)
+        return SparseFrameData(test, train)
 
     def frames(self, track: bool = True) -> FrameData:
         test = to_frames(self.test, track)
