@@ -19,6 +19,7 @@ CACHE = os.path.join(C, TAG)
 TEST = "Test.zip"
 TRAIN = "Train.zip"
 FEATURE_DIMENSION = 34
+POLARITY = 2
 FEATURES = FEATURE_DIMENSION * FEATURE_DIMENSION
 MS_TIMESTEPS = 337  # Maximum timestep of datatset in milliseconds
 
@@ -99,7 +100,6 @@ def to_events(data: dict[str, bytes], track: bool = True) -> list[list[Event]]:
     return examples
 
 
-# When using frames we discretize timesteps over milliseconds instead of microseconds to be able to handle the dataset given memory limitations.
 def to_frames(
     data: dict[str, bytes], track: bool = True, memory_bytes: int = 1024**3
 ) -> npt.NDArray[int8]:
@@ -107,27 +107,34 @@ def to_frames(
     size: Callable[[int], tuple[int, int, int, int]] = lambda n: (
         MS_TIMESTEPS,
         n,
+        POLARITY,
         FEATURE_DIMENSION,
         FEATURE_DIMENSION,
     )
     # The number of samples to store in memory to remain under `memory_bytes`
     memory_samples = memory_bytes // (
-        MS_TIMESTEPS * FEATURE_DIMENSION * FEATURE_DIMENSION
+        MS_TIMESTEPS * POLARITY * FEATURE_DIMENSION * FEATURE_DIMENSION
     )
-    print(f"memory_samples: {memory_samples}")
     mem_events: npt.NDArray[int8] = np.zeros(
         shape=size(memory_samples), dtype=int8
     )  # TODO Why can't I use `np.empty` here?
+    print(f"mem_events.shape: {mem_events.shape}")
+
     dsk_events: npt.NDArray[int8] = np.memmap(
         filename=NamedTemporaryFile(), dtype=int8, mode="w+", shape=size(len(data))
     )
+    print(f"dsk_events.shape: {dsk_events.shape}")
     data_list: list[bytes] = list(data.values())
 
-    max_ts = 0
     with tqdm(total=len(data), desc="Framing", disable=not track) as bar:
-        for chunk in range(0, len(data) // memory_samples):
+        # Handle full chunks
+        # `+1`` to handle partial chunk at end
+        for chunk in range(0, (len(data) // memory_samples) + 1):
             mem_events.fill(0)
-            start, stop = chunk * memory_samples, (chunk + 1) * memory_samples
+            start = chunk * memory_samples
+            stop = min(
+                (chunk + 1) * memory_samples, len(data)
+            )  # `min` to handle partial chunk at end
             for sample_idx, value in enumerate(data_list[start:stop]):
                 # Assert each example is a multiple of 5 bytes (40 bits).
                 assert len(value) % 5 == 0
@@ -138,20 +145,23 @@ def to_frames(
 
                     # Set event.
                     assert event.time // 1000 < MS_TIMESTEPS, f"{event.time // 1000}"
-                    if event.time // 1000 > max_ts:
-                        max_ts = event.time // 1000
 
-                    mem_events[event.time // 1000, sample_idx, event.x, event.y] = (
-                        1 if event.polarity else -1
-                    )
+                    mem_events[
+                        event.time // 1000,
+                        sample_idx,
+                        0 if event.polarity else 1,
+                        event.x,
+                        event.y,
+                    ] = 1
                 bar.update(1)
-            dsk_events[:, start:stop, :, :] = mem_events
+            dsk_events[:, start:stop, :, :, :] = mem_events[
+                :, : stop - start, :, :, :
+            ]  # `:stop-start` to handle partial chunk at end
             dsk_events.flush()
-    print(f"found max: {max_ts}")
+
     return dsk_events
 
 
-# When using frames we discretize timesteps over milliseconds instead of microseconds to be able to handle the dataset given memory limitations.
 def to_sparse_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
     # [time x sample x feature]
     n_samples = len(data)
@@ -159,7 +169,12 @@ def to_sparse_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
         {}
     )  # Stores coordinates and values
 
-    with tqdm(total=len(data), desc="Framing", disable=not track) as bar:
+    with tqdm(
+        total=len(data),
+        desc="Framing",
+        disable=not track,
+        bar_format="{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}, Memory: {postfix}]",
+    ) as bar:
         for sample_idx, value in enumerate(data.values()):
             # Assert each example is a multiple of 5 bytes (40 bits)
             assert len(value) % 5 == 0
@@ -176,6 +191,8 @@ def to_sparse_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
                 # Store only non-zero values (polarity 1)
                 events_dict[coord] = 1 if event.polarity else -1
 
+            dict_size_mb = sys.getsizeof(events_dict) / (1024 * 1024)
+            bar.set_postfix_str(f"{dict_size_mb:.2f} MB")
             bar.update(1)
 
     # Convert dictionary to sparse array
@@ -196,6 +213,8 @@ def to_sparse_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
     )
 
 
+# When using frames we discretize timesteps over milliseconds instead of
+# microseconds to be able to handle the dataset given memory limitations.
 @dataclass
 class NMNIST:
     test: dict[str, bytes]
@@ -249,5 +268,8 @@ def nmnist(cache: bool = True, track: bool = True) -> NMNIST:
     # Unzip test and train data.
     test, train = files.get(TEST), files.get(TRAIN)
     assert test and train
+    # Each event is stored as its owned file and thus when unzipped we get a
+    # dictionary of small files where the binary data of the file describes the
+    # event.
     test, train = unzip(BytesIO(test)), unzip(BytesIO(train))
     return NMNIST(test, train)
