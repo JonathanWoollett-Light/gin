@@ -7,17 +7,18 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Callable
 from tempfile import NamedTemporaryFile
-
+from pathlib import Path
 import numpy.typing as npt
 import sparse
 from tqdm import tqdm
 from numpy import int8, int32, int64
+from os import listdir
 
 SOURCE = "https://prod-dcd-datasets-cache-zipfiles.s3.eu-west-1.amazonaws.com/468j46mzdv-1.zip"
 TAG = "nmnist"
 CACHE = os.path.join(C, TAG)
-TEST = "Test.zip"
-TRAIN = "Train.zip"
+TEST = Path("Test.zip")
+TRAIN = Path("Train.zip")
 FEATURE_DIMENSION = 34
 POLARITY = 2
 FEATURES = FEATURE_DIMENSION * FEATURE_DIMENSION
@@ -33,7 +34,9 @@ class SparseFrameData:
 @dataclass
 class FrameData:
     test: npt.NDArray[int8]
+    test_labels: npt.NDArray[int8]
     train: npt.NDArray[int8]
+    train_labels: npt.NDArray[int8]
 
 
 @dataclass
@@ -101,8 +104,8 @@ def to_events(data: dict[str, bytes], track: bool = True) -> list[list[Event]]:
 
 
 def to_frames(
-    data: dict[str, bytes], track: bool = True, memory_bytes: int = 1024**3
-) -> npt.NDArray[int8]:
+    data: dict[Path, bytes], track: bool = True, memory_bytes: int = 1024**3
+) -> tuple[npt.NDArray[int8],npt.NDArray[int8]]:
     # [time x sample x features..]
     size: Callable[[int], tuple[int, int, int, int]] = lambda n: (
         MS_TIMESTEPS,
@@ -115,16 +118,26 @@ def to_frames(
     memory_samples = memory_bytes // (
         MS_TIMESTEPS * POLARITY * FEATURE_DIMENSION * FEATURE_DIMENSION
     )
+
+    # TODO Why can't I use `np.empty` here?
+    mem_targets: npt.NDArray[int8] = np.zeros(
+        shape=(len(data),), dtype=int8
+    )  
     mem_events: npt.NDArray[int8] = np.zeros(
         shape=size(memory_samples), dtype=int8
-    )  # TODO Why can't I use `np.empty` here?
+    )  
+    print(f"mem_targets.shape: {mem_targets.shape}")
     print(f"mem_events.shape: {mem_events.shape}")
 
+    dsk_targets: npt.NDArray[int8] = np.memmap(
+        filename=NamedTemporaryFile(), dtype=int8, mode="w+", shape=(len(data),)
+    )
     dsk_events: npt.NDArray[int8] = np.memmap(
         filename=NamedTemporaryFile(), dtype=int8, mode="w+", shape=size(len(data))
     )
+    print(f"dsk_targets.shape: {dsk_targets.shape}")
     print(f"dsk_events.shape: {dsk_events.shape}")
-    data_list: list[bytes] = list(data.values())
+    data_list: list[(Path, bytes)] = list(data.items())
 
     with tqdm(total=len(data), desc="Framing", disable=not track) as bar:
         # Handle full chunks
@@ -135,7 +148,7 @@ def to_frames(
             stop = min(
                 (chunk + 1) * memory_samples, len(data)
             )  # `min` to handle partial chunk at end
-            for sample_idx, value in enumerate(data_list[start:stop]):
+            for sample_idx, (path, value) in enumerate(data_list[start:stop]):
                 # Assert each example is a multiple of 5 bytes (40 bits).
                 assert len(value) % 5 == 0
 
@@ -146,6 +159,8 @@ def to_frames(
                     # Set event.
                     assert event.time // 1000 < MS_TIMESTEPS, f"{event.time // 1000}"
 
+                    # Set label and data
+                    mem_targets[sample_idx] = int(path.parent.name)
                     mem_events[
                         event.time // 1000,
                         sample_idx,
@@ -154,12 +169,18 @@ def to_frames(
                         event.y,
                     ] = 1
                 bar.update(1)
+            
+            # `:stop-start` to handle partial chunk at end
+            dsk_targets[start:stop] = mem_targets[stop - start]
             dsk_events[:, start:stop, :, :, :] = mem_events[
                 :, : stop - start, :, :, :
-            ]  # `:stop-start` to handle partial chunk at end
+            ]
+
+            # Flush to disk to avoid holding it in memory.
+            dsk_targets.flush()
             dsk_events.flush()
 
-    return dsk_events
+    return (dsk_events,dsk_targets)
 
 
 def to_sparse_frames(data: dict[str, bytes], track: bool = True) -> sparse.COO:
@@ -226,9 +247,9 @@ class NMNIST:
         return SparseFrameData(test, train)
 
     def frames(self, track: bool = True) -> FrameData:
-        test = to_frames(self.test, track)
-        train = to_frames(self.train, track)
-        return FrameData(test, train)
+        test, test_labels = to_frames(self.test, track)
+        train, train_labels = to_frames(self.train, track)
+        return FrameData(test, test_labels, train, train_labels)
 
     def events(self, track: bool = True) -> EventData:
         test = to_events(self.test, track)
@@ -267,7 +288,7 @@ def nmnist(cache: bool = True, track: bool = True) -> NMNIST:
 
     # Unzip test and train data.
     test, train = files.get(TEST), files.get(TRAIN)
-    assert test and train
+    assert test and train, f"files: {[k for k in list(files)[:10]]}"
     # Each event is stored as its owned file and thus when unzipped we get a
     # dictionary of small files where the binary data of the file describes the
     # event.

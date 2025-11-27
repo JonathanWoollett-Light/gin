@@ -4,6 +4,7 @@ from io import BytesIO
 from tqdm import tqdm
 import os
 import zipfile
+from pathlib import Path
 
 SUFFIX = "afrOfUbwOs"
 CACHE = os.path.join(tempfile.gettempdir(), SUFFIX)
@@ -43,7 +44,7 @@ def download(url: str, chunk_size: int = 1024 * 64, track: bool = True) -> Bytes
     return buffer
 
 
-def unzip(buffer: BytesIO, track: bool = True) -> dict[str, bytes]:
+def unzip(buffer: BytesIO, track: bool = True) -> dict[Path, bytes]:
     """
     Unzips the contents of an in-memory ZIP file stored in a BytesIO buffer.
 
@@ -86,7 +87,7 @@ def unzip(buffer: BytesIO, track: bool = True) -> dict[str, bytes]:
 
             with zip_ref.open(member) as file_in_zip:
                 content = file_in_zip.read()
-                unzipped_files[os.path.basename(member.filename)] = content
+                unzipped_files[Path(*Path(member.filename).parts[1:])] = content
                 # Update progress bars
                 byte_bar.update(getattr(member, "file_size", 0))
             file_bar.update(1)

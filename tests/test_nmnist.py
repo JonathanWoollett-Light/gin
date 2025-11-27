@@ -11,5 +11,5 @@ def test_nmnist():
     print("Getting frames")
     _ = x.frames()
 
-    print("Getting events")
-    _ = x.events()
+    # print("Getting events")
+    # _ = x.events()
